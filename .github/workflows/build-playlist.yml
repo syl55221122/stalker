@@ -1,0 +1,71 @@
+# GitHub Actions workflow: 定时跑 Stalker 转 M3U，自动更新播放列表
+#
+# 放置位置（在你的仓库里）: .github/workflows/build-playlist.yml
+# 脚本位置（在你的仓库里）: stalker_to_m3u_basketball.py（与 Mac_playlist.m3u 同目录）
+#
+# ===== 必须先做好的两件事（只做一次）=====
+# 1. 仓库设为 PRIVATE（私有）！
+#    生成的 Mac_playlist.m3u 里嵌了 MAC 和 Bearer token，公开仓库等于公开账号凭证。
+# 2. 在仓库 Settings -> Secrets and variables -> Actions -> New repository secret 里加一个：
+#    Name:  MAC_LIST
+#    Value: 多行文本，每行一个门户，格式和 Mac_list.txt 完全一样：
+#             http://portal1.example.com,00:1A:79:XX:XX:XX
+#             http://portal2.example.com,00:1A:79:YY:YY:YY
+#    注意：Mac_list.txt 本人不要提交进仓库，只放进 Secret。
+#
+# ===== 运行频率说明 =====
+# 下面是每 6 小时跑一次（UTC 时间）。Stalker token 一般几小时就失效，
+# 跑得太稀列表很快播不了，跑得太密可能被门户限流，6 小时是折中。
+# 也可以随时在 Actions 页点 Run workflow 手动跑一次。
+# GitHub 的定时任务可能延迟几分钟到几十分钟，属于正常现象。
+
+name: Build Stalker Playlist
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Write Mac_list.txt from secret
+        env:
+          MAC_LIST: ${{ secrets.MAC_LIST }}
+        run: |
+          if [ -z "$MAC_LIST" ]; then
+            echo "MAC_LIST secret is empty. Add it in Settings -> Secrets and variables -> Actions." >&2
+            exit 1
+          fi
+          printf '%s\n' "$MAC_LIST" > Mac_list.txt
+          echo "portals: $(grep -c . Mac_list.txt)"
+
+      - name: Generate playlist
+        run: python stalker_to_m3u_basketball.py
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Mac_playlist.m3u
+          if git diff --cached --quiet; then
+            echo "No changes, skip commit."
+          else
+            git commit -m "Update playlist $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git push
+          fi
