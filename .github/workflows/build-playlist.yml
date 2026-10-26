@@ -34,6 +34,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 拉完整历史，这样后面 pull --rebase 才能正常工作（默认只拉 1 层容易出问题）
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -69,5 +72,8 @@ jobs:
             echo "No changes, skip commit."
           else
             git commit -m "Update playlist $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            # 关键：如果运行期间你又手动传了文件（或另一轮跑完了），远程已经超前，
+            # 直接 push 会被拒绝（fetch first）。先拉取并变基合并，再推就不会被拒。
+            git pull --rebase origin main
             git push
           fi
