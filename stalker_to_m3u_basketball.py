@@ -22,7 +22,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional, Any, Tuple, Union
 
 import requests
@@ -626,7 +626,149 @@ TRANSLATE_PHRASES = [
     ("CLIPPERS", "快船"),
     ("LAKERS", "湖人"),
     ("SPURS IN-ARENA", "马刺 IN-ARENA"),
+    # Tháng (dự phòng cho tháng đứng một mình; tháng + ngày đã xử lý bằng regex ở trên)
+    ("JANUARY", "1月"),
+    ("FEBRUARY", "2月"),
+    ("MARCH", "3月"),
+    ("APRIL", "4月"),
+    ("JUNE", "6月"),
+    ("JULY", "7月"),
+    ("AUGUST", "8月"),
+    ("SEPTEMBER", "9月"),
+    ("OCTOBER", "10月"),
+    ("NOVEMBER", "11月"),
+    ("DECEMBER", "12月"),
+    ("JAN", "1月"),
+    ("FEB", "2月"),
+    ("MAR", "3月"),
+    ("APR", "4月"),
+    ("MAY", "5月"),
+    ("JUN", "6月"),
+    ("JUL", "7月"),
+    ("AUG", "8月"),
+    ("SEP", "9月"),
+    ("OCT", "10月"),
+    ("NOV", "11月"),
+    ("DEC", "12月"),
+    # Múi giờ Mỹ (ET 是比赛时间最常见的；UK 已由国家词翻成英国)
+    ("ET", "美东时间"),
+    ("CT", "中部时间"),
+    ("MT", "山地时间"),
+    ("PT", "太平洋时间"),
 ]
+
+
+MONTH_NUM = {
+    "JANUARY": 1, "FEBRUARY": 2, "MARCH": 3, "APRIL": 4, "MAY": 5, "JUNE": 6,
+    "JULY": 7, "AUGUST": 8, "SEPTEMBER": 9, "OCTOBER": 10, "NOVEMBER": 11, "DECEMBER": 12,
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+_MONTH_ALT = "|".join(sorted(MONTH_NUM, key=len, reverse=True))
+
+
+def _ampm_to_zh(m):
+    """'5:00 PM' -> '下午5:00'，按小时分凌晨/上午/中午/下午/晚上。"""
+    h = int(m.group(1))
+    minute = m.group(2)
+    ap = m.group(3).upper()
+    if ap == "AM":
+        period = "凌晨" if h == 12 or 1 <= h <= 5 else "上午"
+    else:
+        if h == 12:
+            period = "中午"
+        elif 1 <= h <= 5:
+            period = "下午"
+        else:
+            period = "晚上"
+    return f"{period}{h}:{minute}"
+
+
+def _sunday_on_or_after(year, month, day):
+    """返回 year-month-day 当天或之后的第一个周日。"""
+    d = date(year, month, day)
+    d += timedelta(days=(6 - d.weekday()) % 7)
+    return d
+
+
+def _last_sunday(year, month):
+    """返回某年某月的最后一个周日。"""
+    if month == 12:
+        last = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        last = date(year, month + 1, 1) - timedelta(days=1)
+    last -= timedelta(days=(last.weekday() + 1) % 7)
+    return last
+
+
+def _infer_year(month, day):
+    """比赛日期离运行当天只有几天，取与今天最接近的那个年份（含闰年 2 月 29 日容错）。"""
+    today = date.today()
+    best = None
+    best_diff = None
+    for y in (today.year, today.year - 1, today.year + 1):
+        try:
+            cand = date(y, month, day)
+        except ValueError:
+            continue
+        diff = abs((cand - today).days)
+        if best_diff is None or diff < best_diff:
+            best, best_diff = cand, diff
+    return best
+
+
+def _beijing_period_hour(hour24):
+    """北京时间 24 小时 -> (中文时段, 12 小时制小时)。"""
+    if 0 <= hour24 <= 5:
+        period = "凌晨"
+    elif 6 <= hour24 <= 11:
+        period = "上午"
+    elif hour24 == 12:
+        period = "中午"
+    elif 13 <= hour24 <= 17:
+        period = "下午"
+    else:
+        period = "晚上"
+    h12 = hour24 % 12
+    return period, (12 if h12 == 0 else h12)
+
+
+def _to_24h(hour12, ampm):
+    """12 小时制 -> 24 小时制。"""
+    if ampm.upper() == "AM":
+        return 0 if hour12 == 12 else hour12
+    return 12 if hour12 == 12 else hour12 + 12
+
+
+def _beijing_from_et(m):
+    """'OCT 25 - 5:00 PM ET / 10:00 PM UK' -> '10月26日 凌晨5:00'（美东转北京时间，夏令时 +12、冬令时 +13，UK 时间同属一场故舍去）。"""
+    month = MONTH_NUM[m.group(1).upper()]
+    day = int(m.group(2))
+    et_dt = None
+    d = _infer_year(month, day)
+    if d is not None:
+        dst_start = _sunday_on_or_after(d.year, 3, 1) + timedelta(days=7)  # 3 月第 2 个周日
+        dst_end = _sunday_on_or_after(d.year, 11, 1)  # 11 月第 1 个周日
+        is_dst = dst_start <= d < dst_end
+        et_dt = datetime(d.year, month, day, _to_24h(int(m.group(3)), m.group(5)), int(m.group(4)))
+        bj = et_dt + timedelta(hours=12 if is_dst else 13)
+        period, h12 = _beijing_period_hour(bj.hour)
+        return f"{bj.month}月{bj.day}日 {period}{h12}:{bj.minute:02d}"
+    return m.group(0)
+
+
+def _beijing_from_uk(m):
+    """仅有 UK 时间时：'OCT 25 - 10:00 PM UK' -> 北京时间（夏令时 +7、冬令时 +8）。"""
+    month = MONTH_NUM[m.group(1).upper()]
+    day = int(m.group(2))
+    d = _infer_year(month, day)
+    if d is not None:
+        is_dst = _last_sunday(d.year, 3) <= d < _last_sunday(d.year, 10)
+        uk_dt = datetime(d.year, month, day, _to_24h(int(m.group(3)), m.group(5)), int(m.group(4)))
+        bj = uk_dt + timedelta(hours=7 if is_dst else 8)
+        period, h12 = _beijing_period_hour(bj.hour)
+        return f"{bj.month}月{bj.day}日 {period}{h12}:{bj.minute:02d}"
+    return m.group(0)
 
 
 def translate_name(text: str) -> str:
@@ -634,6 +776,23 @@ def translate_name(text: str) -> str:
     if not text:
         return text
     out = text
+    # 先把能解析的美东/英国时间换算成北京时间（必须在下面中文标签替换之前，
+    # 换算后就没有英文月日和 AM/PM 了，不会被重复处理；解析不上的退回中文标签写法）
+    out = re.sub(
+        r"\b(" + _MONTH_ALT + r")\s+(\d{1,2})\s*[–—\-]?\s*(\d{1,2}):(\d{2})\s*(AM|PM)\s*(?:EST|EDT|ET)\b\s*(?:/\s*\d{1,2}:\d{2}\s*(?:AM|PM)\s*(?:UK|英国))?",
+        _beijing_from_et, out, flags=re.IGNORECASE,
+    )
+    out = re.sub(
+        r"\b(" + _MONTH_ALT + r")\s+(\d{1,2})\s*[–—\-]?\s*(\d{1,2}):(\d{2})\s*(AM|PM)\s*UK\b",
+        _beijing_from_uk, out, flags=re.IGNORECASE,
+    )
+    # 剩下的时间信息改中文标签：月+日 -> X月Y日；小时:分 AM/PM -> 中文时段
+    out = re.sub(
+        r"\b(" + _MONTH_ALT + r")\s+(\d{1,2})\b",
+        lambda mm: f"{MONTH_NUM[mm.group(1).upper()]}月{mm.group(2)}日",
+        out, flags=re.IGNORECASE,
+    )
+    out = re.sub(r"\b(\d{1,2}):(\d{2})\s*(AM|PM)\b", _ampm_to_zh, out, flags=re.IGNORECASE)
     for en, zh in TRANSLATE_PHRASES:
         pattern = r"(?<!\w)" + re.escape(en) + r"(?!\w)"
         out = re.sub(pattern, zh, out, flags=re.IGNORECASE)
