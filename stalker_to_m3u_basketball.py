@@ -374,7 +374,10 @@ def check_stream_url(stream_url: str, headers: Dict, debug: bool = False) -> boo
             return True
         else:
             if debug:
-                print(f"      Stream test FAILED: HTTP {resp.status_code}")
+                if resp.status_code == 407:
+                    print(f"      Stream test FAILED: HTTP 407 (proxy authentication required — likely an environment/proxy issue, not a dead stream)")
+                else:
+                    print(f"      Stream test FAILED: HTTP {resp.status_code}")
             return False
     except Exception as e:
         if debug:
@@ -423,13 +426,14 @@ def test_portal(url: str, mac: str, debug: bool = False, check_stream: bool = Tr
                     if debug:
                         print("  Stream test: OK")
                 else:
+                    # Stream test is advisory only: a failed probe (e.g. HTTP 407
+                    # from a proxy in front of the runner) must NOT discard a
+                    # portal whose handshake + channel list work fine.
                     if debug:
-                        print("  Stream test: FAILED (error or inaccessible)")
-                    return None
+                        print("  Stream test: FAILED (warning only — portal kept)")
             else:
                 if debug:
-                    print("  Could not create stream URL for test channel")
-                return None
+                    print("  Could not create stream URL for test channel (warning only — portal kept)")
 
     except Exception as e:
         print(f"Channel fetch failed for {url}: {e}")
